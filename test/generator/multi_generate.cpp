@@ -24,14 +24,20 @@ public:
 };
 
 int main(int argc, const char **argv) {
+    assert(argc >= 3);
+    const char *output_dir = argv[1];
+
     MultiTest multi;
+    multi.target.from_string(argv[2]);
 
     std::vector<Internal::GeneratorParamValues> param_sets;
     param_sets.push_back({{ "scale", "2" }, { "amplify", "true" }});
     param_sets.push_back({{ "scale", "3" }, { "amplify", "true" }});
     param_sets.push_back({{ "scale", "2" }, { "amplify", "false" }});
     param_sets.push_back({{ "scale", "3" }, { "amplify", "false" }});
-    multi.emit_filter(param_sets, argv[1], "multi", "multi", MultiTest::EmitOptions());
+    MultiTest::EmitOptions options;
+    options.emit_stmt_html = true;
+    multi.emit_filter(param_sets, output_dir, "multi", "multi", options);
 
     return 0;
 }
