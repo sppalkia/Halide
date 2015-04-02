@@ -114,9 +114,25 @@ public:
     EXPORT virtual ~GeneratorParamBase();
     virtual void from_string(const std::string &value_string) = 0;
     virtual std::string to_string() const = 0;
+    virtual Expr to_expr() const { return Expr(); }
 
     const std::string name;
 };
+
+// The generic ToExpr returns an undefined Expr object.
+template <typename T>
+struct ToExpr {
+    static Expr to_expr(T value) { return Expr(); }
+};
+
+// For types we support, conver an instance of the type to an Expr.
+template <> struct ToExpr<bool> { static Expr to_expr(bool value) { return cast<bool>(value); } };
+template <> struct ToExpr<int8_t> { static Expr to_expr(int8_t value) { return cast<int8_t>(value); } };
+template <> struct ToExpr<int16_t> { static Expr to_expr(int16_t value) { return cast<int16_t>(value); } };
+template <> struct ToExpr<int32_t> { static Expr to_expr(int32_t value) { return cast<int32_t>(value); } };
+template <> struct ToExpr<uint8_t> { static Expr to_expr(uint8_t value) { return cast<uint8_t>(value); } };
+template <> struct ToExpr<uint16_t> { static Expr to_expr(uint16_t value) { return cast<uint16_t>(value); } };
+template <> struct ToExpr<float> { static Expr to_expr(float value) { return cast<float>(value); } };
 
 }  // namespace Internal
 
@@ -212,6 +228,10 @@ public:
     std::string to_string() const override {
         // delegate to a function that we can specialize based on the template argument
         return to_string_impl(value);
+    }
+
+    Expr to_expr() const override {
+        return Internal::ToExpr<T>::to_expr(value);
     }
 
     operator T() const { return value; }
@@ -432,6 +452,10 @@ public:
     // will be used as file_base_name. If function_name is empty, generator_name()
     // will be used for the function.
     EXPORT void emit_filter(const std::string &output_dir, const std::string &function_name = "",
+                            const std::string &file_base_name = "", const EmitOptions &options = EmitOptions());
+
+    EXPORT void emit_filter(const std::vector<GeneratorParamValues> &param_sets,
+                            const std::string &output_dir, const std::string &function_name = "",
                             const std::string &file_base_name = "", const EmitOptions &options = EmitOptions());
 
 protected:

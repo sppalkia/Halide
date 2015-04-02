@@ -2,6 +2,10 @@
 #if __cplusplus > 199711L || _MSC_VER >= 1800
 
 #include "Generator.h"
+#include "LLVM_Headers.h"
+#include "LLVM_Output.h"
+#include "Output.h"
+#include "Simplify.h"
 
 namespace {
 
@@ -272,6 +276,46 @@ void GeneratorBase::set_generator_param_values(const GeneratorParamValues &param
     }
 }
 
+namespace {
+
+void emit_module(const Module &m,
+                 const std::string &output_dir,
+                 const std::string &function_name,
+                 const std::string &file_base_name,
+                 const GeneratorBase::EmitOptions &options) {
+    std::string base_path = output_dir + "/" + (file_base_name.empty() ? function_name : file_base_name);
+    if (options.emit_o || options.emit_assembly || options.emit_bitcode) {
+        llvm::LLVMContext context;
+        llvm::Module *llvm_module = compile_module_to_llvm_module(m, context);
+
+        if (options.emit_o) {
+            compile_llvm_module_to_object(llvm_module, base_path + ".o");
+        }
+        if (options.emit_assembly) {
+            compile_llvm_module_to_assembly(llvm_module, base_path + ".s");
+        }
+        if (options.emit_bitcode) {
+            compile_llvm_module_to_llvm_bitcode(llvm_module, base_path + ".bc");
+        }
+
+        delete llvm_module;
+    }
+    if (options.emit_h) {
+        compile_module_to_c_header(m, base_path + ".h");
+    }
+    if (options.emit_cpp) {
+        compile_module_to_c_source(m, base_path + ".cpp");
+    }
+    if (options.emit_stmt) {
+        compile_module_to_text(m, base_path + ".stmt");
+    }
+    if (options.emit_stmt_html) {
+        compile_module_to_html(m, base_path + ".html");
+    }
+}
+
+}  // namespace
+
 void GeneratorBase::emit_filter(const std::string &output_dir,
                                 const std::string &function_name,
                                 const std::string &file_base_name,
@@ -281,32 +325,128 @@ void GeneratorBase::emit_filter(const std::string &output_dir,
     Func func = build();
 
     std::vector<Halide::Argument> inputs = get_filter_arguments();
-    std::string base_path = output_dir + "/" + (file_base_name.empty() ? function_name : file_base_name);
-    if (options.emit_o || options.emit_assembly || options.emit_bitcode) {
-        Outputs output_files;
-        if (options.emit_o) {
-            output_files.object_name = base_path + ".o";
+    Module m = func.compile_to_module(inputs, function_name, target);
+    emit_module(m, output_dir, function_name, file_base_name, options);
+}
+
+void GeneratorBase::emit_filter(const std::vector<GeneratorParamValues> &param_sets,
+                                const std::string &output_dir,
+                                const std::string &function_name,
+                                const std::string &file_base_name,
+                                const EmitOptions &options) {
+    // TODO: Ensure that all param_sets have the same set of keys.
+    std::vector<Module> modules;
+
+    // TODO(dsharlet): These need to be constant for all generator
+    // param sets, verify this is the case.
+    std::vector<Argument> filter_args = get_filter_arguments();
+
+    struct GenArg {
+        Argument arg;
+        Expr value;
+        GeneratorParamBase *param;
+    };
+
+    // TODO: Despite iterating over generator_params (and then finding
+    // the param in the param set), the arguments seem to come out in
+    // the wrong order (alphabetized?).
+    std::vector<Expr> not_found_msg = { Expr("Filter for generator params not found") };
+    std::vector<GenArg> generator_args;
+    for (const auto &i : generator_params) {
+        // We loop over our generator params and then try to find them
+        // in the param_sets to preserve the order.
+        if (param_sets.front().find(i.second->name) != param_sets.front().end()) {
+            // We only get an Expr to get its type.
+            Expr value = i.second->to_expr();
+            // TODO: This should be a user assert.
+            assert(value.defined());
+            GenArg arg = {
+                Argument(i.second->name, Argument::InputScalar, value.type(), 0),
+                Variable::make(value.type(), i.second->name),
+                i.second
+            };
+            generator_args.push_back(arg);
+
+            not_found_msg.push_back(Expr(", " + i.second->name + " = "));
+            not_found_msg.push_back(arg.value);
         }
-        if (options.emit_assembly) {
-            output_files.assembly_name = base_path + ".s";
+    }
+    Stmt multi_body = AssertStmt::make(const_false(), not_found_msg);
+
+    std::vector<Argument> outputs;
+
+    // TODO: This is a really expensive loop that could be parallelized.
+    for (const auto &params : param_sets) {
+        // Set the values for the generator.
+        set_generator_param_values(params);
+        build_params();
+        Func f = build();
+
+        if (outputs.empty()) {
+            for (int i = 0; i < f.outputs(); i++) {
+                outputs.push_back(f.output_buffers()[i]);
+            }
+        } else {
+            user_assert(outputs.size() == f.outputs()) << "Generator defined Func with different number of outputs.";
+            // TODO: Also verify types match.
         }
-        if (options.emit_bitcode) {
-            output_files.bitcode_name = base_path + ".bc";
+
+        // Append the argument name/value pairs to the function name
+        // for uniqueness and identication.
+        std::string unique_name = function_name; //!function_name.empty() ? function_name : f.name();
+        for (const auto &i : params) {
+            unique_name += "_" + i.first + i.second;
         }
-        func.compile_to(output_files, inputs, function_name, target);
+
+        // Compile the Func to a module and store it in the list.
+        modules.push_back(f.compile_to_module(filter_args, unique_name, target));
+
+        std::vector<Expr> filter_arg_values;
+        for (const auto &arg : filter_args) {
+            if (arg.is_buffer()) {
+                filter_arg_values.push_back(Variable::make(type_of<void*>(), arg.name));
+            } else {
+                filter_arg_values.push_back(Variable::make(arg.type, arg.name));
+            }
+        }
+        for (const auto &arg : outputs) {
+            assert(arg.is_buffer());
+            filter_arg_values.push_back(Variable::make(type_of<void*>(), arg.name));
+        }
+
+        // Generate a call to this particular filter instantiation of
+        // the filter, and put it in an if statement checking that the
+        // generator params are equal to the values used for this
+        // instance.
+        Expr call = Call::make(Int(32), unique_name, filter_arg_values, Call::Extern);
+        std::stringstream fail_msg(function_name);
+        fail_msg << " {";
+        Expr cond = const_true();
+        for (const auto &i : generator_args) {
+            fail_msg << ", " << i.param->name << "=" << params.at(i.param->name);
+            cond = cond && (i.value == i.param->to_expr());
+        }
+        fail_msg << "} failed";
+        Stmt body = AssertStmt::make(call == 0, fail_msg.str());
+        multi_body = IfThenElse::make(Internal::simplify(cond), body, multi_body);
     }
-    if (options.emit_h) {
-        func.compile_to_header(base_path + ".h", inputs, function_name, target);
+
+    // Link all the modules together
+    Module m = link_modules(function_name, modules);
+
+    // Assemble a wrapper func for the multi_body, and add it to the
+    // module.
+    std::vector<Argument> args;
+    for (const auto &i : generator_args) {
+        args.push_back(i.arg);
     }
-    if (options.emit_cpp) {
-        func.compile_to_c(base_path + ".cpp", inputs, function_name, target);
-    }
-    if (options.emit_stmt) {
-        func.compile_to_lowered_stmt(base_path + ".stmt", Halide::Text, target);
-    }
-    if (options.emit_stmt_html) {
-        func.compile_to_lowered_stmt(base_path + ".html", Halide::HTML, target);
-    }
+    args.insert(args.end(), filter_args.begin(), filter_args.end());
+    args.insert(args.end(), outputs.begin(), outputs.end());
+    m.append(LoweredFunc(function_name, args, multi_body, LoweredFunc::External));
+
+    compile_module_to_html(m, "test.html");
+
+    emit_module(m, output_dir, function_name, file_base_name, options);
 }
 
 Func GeneratorBase::call_extern(std::initializer_list<ExternFuncArgument> function_arguments,

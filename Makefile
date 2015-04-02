@@ -682,11 +682,21 @@ $(FILTERS_DIR)/%.generator: test/generator/%_generator.cpp $(GENGEN_DEPS)
 	@mkdir -p $(FILTERS_DIR)
 	$(CXX) -std=c++11 -g $(CXX_WARNING_FLAGS) -fno-rtti -Iinclude $(filter %_generator.cpp,$^) tools/GenGen.cpp -L$(BIN_DIR) -lHalide -lz -lpthread -ldl -o $@
 
+# For tests that include their own main to run the generator, don't include GenGen.cpp.
+$(FILTERS_DIR)/%.generate: test/generator/%_generate.cpp $(GENGEN_DEPS)
+	@mkdir -p $(FILTERS_DIR)
+	$(CXX) -std=c++11 -g $(CXX_WARNING_FLAGS) -fno-rtti -Iinclude $(filter %_generate.cpp,$^) -L$(BIN_DIR) -lHalide -lz -lpthread -ldl -o $@
+
 # By default, %.o/.h are produced by executing %.generator
 $(FILTERS_DIR)/%.o $(FILTERS_DIR)/%.h: $(FILTERS_DIR)/%.generator
 	@mkdir -p $(FILTERS_DIR)
 	@-mkdir -p tmp
 	cd tmp; $(LD_PATH_SETUP) ../$< -g $(notdir $*) -o ../$(FILTERS_DIR) target=$(HL_TARGET)
+
+# For generators with their own main, just run it, passing the filters dir and the target.
+$(FILTERS_DIR)/%.o $(FILTERS_DIR)/%.h: $(FILTERS_DIR)/%.generate
+	@-mkdir -p tmp
+	cd tmp; $(LD_PATH_SETUP) ../$< ../$(FILTERS_DIR) $(HL_TARGET)
 
 # If we want to use a Generator with custom GeneratorParams, we need to write
 # custom rules: to pass the GeneratorParams, and to give a unique function and file name.
