@@ -1,7 +1,8 @@
 # define a local repository to the 'distrib' directory above us
 new_local_repository(
     name = "halide-root",
-    path = "/usr/local/google/home/srj/Projects/Halide",
+    #path = "/usr/local/google/home/srj/Projects/Halide",
+    path = "/Users/srj/Projects/Halide",
     build_file = "BUILD.halide-root",
 )
 

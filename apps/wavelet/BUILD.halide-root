@@ -1,44 +1,79 @@
-cc_library(name = "libHalideShared",
-           srcs = ["distrib/bin/libHalide.so"],
-           hdrs = ["distrib/include/Halide.h"],
-    linkopts = [
-                "-lpthread",
-                "-ldl",
-                "-lm",
-                "-lz"
-            ],
-            copts = ["-fno-rtti"],
-           includes = ["distrib/include"])
+load("build_defs", "empty_src")
 
-cc_library(name = "libHalideStatic",
-           srcs = ["distrib/bin/libHalide.a"],
-           hdrs = ["distrib/include/Halide.h"],
-            linkopts = [
-                "-lpthread",
-                "-ldl",
-                "-lm",
-                "-lz"
-            ],
-            copts = ["-fno-rtti"],
-           includes = ["distrib/include"])
+# workaround for https://github.com/google/bazel/issues/333
+empty_src(name="empty")
 
-cc_library(name = "gengen",
-           srcs = ["tools/GenGen.cpp"],
-           deps = [":libHalideStatic"])
+cc_library(name="lib_halide",
+           srcs=[
+               "distrib/bin/libHalide.a",
+               ":empty"
+           ],
+           hdrs=[
+               "distrib/include/Halide.h"
+           ],
+           linkopts=[
+               "-lpthread",
+               "-ldl",
+               "-lm",
+               "-lz"
+           ],
+           copts=[
+               "-fno-rtti"
+           ],
+           includes=[
+               "distrib/include"
+           ])
 
-cc_library(name = "halide_runtime",
-          linkopts = ["-lpthread", "-ldl"],
-           hdrs = ["distrib/include/HalideRuntime.h"],
-           includes = ["distrib/include"])
+cc_library(name="gengen",
+           srcs=[
+               "distrib/tools/GenGen.cpp"
+           ],
+           deps=[
+               ":lib_halide"
+           ])
 
-cc_library(name = "image-io",
-          deps = [":halide_runtime"],
-          linkopts = ["-lpng"],
-           hdrs = ["apps/support/image_io.h"],
-           includes = ["apps/support"])
+cc_library(name="halide_runtime",
+           linkopts=[
+               "-lpthread",
+               "-ldl"
+           ],
+           srcs=[
+               ":empty"
+           ],
+           hdrs=[
+               "distrib/include/HalideRuntime.h"
+           ],
+           includes=[
+               "distrib/include"
+           ])
 
-cc_library(name = "static-image",
-          deps = [":halide_runtime"],
-           hdrs = ["apps/support/static_image.h"],
-           includes = ["apps/support"])
+cc_library(name="image-io",
+           deps=[
+               ":halide_runtime"
+           ],
+           linkopts=[
+               "-lpng"
+           ],
+           srcs=[
+               ":empty"
+           ],
+           hdrs=[
+               "apps/support/image_io.h"
+           ],
+           includes=[
+               "apps/support"
+           ])
 
+cc_library(name="static-image",
+           srcs=[
+               ":empty"
+           ],
+           deps=[
+               ":halide_runtime"
+           ],
+           hdrs=[
+               "apps/support/static_image.h"
+           ],
+           includes=[
+               "apps/support"
+           ])
