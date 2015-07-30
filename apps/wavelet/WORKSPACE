@@ -41,14 +41,23 @@ new_http_archive(
     build_file = "halide-distrib-darwin-64.BUILD",
 )
 
+new_http_archive(
+    name = "halide-distrib-linux-64",
+    url = "https://github.com/halide/Halide/releases/download/release_2015_06_03/halide_Linux_64_trunk_gcc-4.8_fe99d863aeff6ac9a128d65b976cfe0caff50b77_2015_06_03.tgz",
+    sha256 = "9b46b8238aafce04f41a0751b309fdc0d2fa1c6d2bc1fba3658074ea1bfc5230",
+    build_file = "halide-distrib-linux-64.BUILD",
+)
+
 bind(
     name='halide_runtime',
-    actual='@halide-distrib-darwin-64//:halide_runtime'
+#    actual='@halide-distrib-darwin-64//:halide_runtime'
+    actual='@halide-distrib-linux-64//:halide_runtime'
 )
 
 bind(
     name='lib_halide',
-    actual='@halide-distrib-darwin-64//:lib_halide'
+#    actual='@halide-distrib-darwin-64//:lib_halide'
+    actual='@halide-distrib-linux-64//:lib_halide'
 )
 
 bind(
