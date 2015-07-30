@@ -16,10 +16,11 @@ cc_library(name="wavelet_filters",
 # bazel run :wavelet -- $PWD/../images/gray.png /tmp
 cc_binary(name="wavelet",
           srcs=[
-              "wavelet.cpp"
+              "wavelet.cpp",
+              "image_io.h",
+              "static_image.h"
           ],
           deps=[
               ":wavelet_filters",
-              "@halide-root//:halide_runtime",
-              "@halide-root//:image-io",
+              "//external:libpng",
           ])

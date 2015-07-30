@@ -38,11 +38,12 @@ def halide_library(name,
     generator_executable = "%s_generator" % name
     native.cc_binary(
         name=generator_executable,
-        srcs=srcs,
+        srcs=srcs + ["GenGen.cpp"],
         copts=["-fno-rtti"],
         deps=[
-            "@halide-root//:gengen",
-            "@halide-root//:lib_halide"
+            # TODO use GenGen from distrib
+            #"@halide-distrib//:gengen",
+            "//external:lib_halide"
         ] + generator_deps,
         visibility=["//visibility:private"]
     )
@@ -70,8 +71,14 @@ def halide_library(name,
         # since cc_library deps follow Unix linker rules, filter_deps can
         # get discarded if they come first.
         deps=[
-            "@halide-root//:halide_runtime"
+            "//external:halide_runtime"
         ] + filter_deps,
-        hdrs=["%s.h" % name],
+        hdrs=[
+            "%s.h" % name
+        ],
+        linkopts=[
+            "-lpthread",
+            "-ldl"
+        ],
         visibility=visibility,
     )
