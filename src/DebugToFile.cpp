@@ -39,19 +39,6 @@ class DebugToFile : public IRMutator {
             for (size_t i = 0; i < op->bounds.size(); i++) {
                 num_elements *= op->bounds[i].extent;
             }
-            args.push_back(Load::make(op->types[0], f.name(), 0, Buffer(), Parameter()));
-            args.push_back(Load::make(op->types[0], f.name(), num_elements-1, Buffer(), Parameter()));
-
-            // The header
-            for (size_t i = 0; i < op->bounds.size(); i++) {
-                if (i < 4) {
-                    args.push_back(op->bounds[i].extent);
-                } else {
-                    args.back() *= op->bounds[i].extent;
-                }
-            }
-            // Fill the remaining args with ones.
-            args.resize(7, 1);
 
             int type_code = 0;
             Type t = op->types[0];
@@ -79,7 +66,9 @@ class DebugToFile : public IRMutator {
                 user_error << "Type " << t << " not supported for debug_to_file\n";
             }
             args.push_back(type_code);
-            args.push_back(t.bytes());
+
+            Expr buf = Variable::make(Handle(), f.name() + ".buffer");
+            args.push_back(buf);
 
             Expr call = Call::make(Int(32), Call::debug_to_file, args, Call::Intrinsic);
             string call_result_name = unique_name("debug_to_file_result");
@@ -102,6 +91,25 @@ public:
     DebugToFile(const map<string, Function> &e) : env(e) {}
 };
 
+class RemoveDummyRealizations : public IRMutator {
+    const vector<Function> &outputs;
+
+    using IRMutator::visit;
+
+    void visit(const Realize *op) {
+        for (Function f : outputs) {
+            if (op->name == f.name()) {
+                stmt = mutate(op->body);
+                return;
+            }
+        }
+        IRMutator::visit(op);
+    }
+
+public:
+    RemoveDummyRealizations(const vector<Function> &o) : outputs(o) {}
+};
+
 Stmt debug_to_file(Stmt s, const vector<Function> &outputs, const map<string, Function> &env) {
     // Temporarily wrap the statement in a realize node for the output functions
     for (Function out : outputs) {
@@ -117,17 +125,7 @@ Stmt debug_to_file(Stmt s, const vector<Function> &outputs, const map<string, Fu
     s = DebugToFile(env).mutate(s);
 
     // Remove the realize node we wrapped around the output
-    for (Function out : outputs) {
-        if (const Realize *r = s.as<Realize>()) {
-            s = r->body;
-        } else if (const Block *b = s.as<Block>()) {
-            const Realize *r = b->rest.as<Realize>();
-            internal_assert(r);
-            s = Block::make(b->first, r->body);
-        } else {
-            internal_error << "Could not unwrap stmt after debug_to_file\n";
-        }
-    }
+    s = RemoveDummyRealizations(outputs).mutate(s);
 
     return s;
 }

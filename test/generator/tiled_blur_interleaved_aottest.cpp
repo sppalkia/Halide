@@ -1,16 +1,16 @@
 #include <math.h>
 #include <stdio.h>
 #include "HalideRuntime.h"
+#include "halide_image.h"
 #include <assert.h>
 
 #include "tiled_blur_interleaved.h"
-#include "halide_image.h"
 
 using namespace Halide::Tools;
 
 const int W = 80, H = 80;
 
-extern "C" int halide_trace(void *user_context, const halide_trace_event *ev) {
+int my_halide_trace(void *user_context, const halide_trace_event *ev) {
     if (ev->event == halide_trace_begin_realization) {
         assert(ev->dimensions == 6);
         int min_x = ev->coordinates[0], width = ev->coordinates[1];
@@ -30,7 +30,9 @@ extern "C" int halide_trace(void *user_context, const halide_trace_event *ev) {
 }
 
 int main(int argc, char **argv) {
-    Image<float> input(W, H, 3);
+    halide_set_custom_trace(&my_halide_trace);
+
+    Image<float> input = Image<float>::make_interleaved(W, H, 3);
     for (int y = 0; y < input.height(); y++) {
         for (int x = 0; x < input.width(); x++) {
             for (int c = 0; c < 3; c++) {
@@ -38,32 +40,11 @@ int main(int argc, char **argv) {
             }
         }
     }
-    Image<float> output(W, H, 3);
+    Image<float> output = Image<float>::make_interleaved(W, H, 3);
 
     printf("Evaluating output over %d x %d in tiles of size 32 x 32\n", W, H);
 
-    buffer_t in = { 0 };
-    buffer_t out = { 0 };
-
-    in.host = (uint8_t *)input.data();
-    in.extent[0] = W;
-    in.extent[1] = H;
-    in.extent[2] = 3;
-    in.stride[0] = 3;
-    in.stride[1] = W * 3;
-    in.stride[2] = 1;
-    in.elem_size = 4;
-
-    out.host = (uint8_t *)output.data();
-    out.extent[0] = W;
-    out.extent[1] = H;
-    out.extent[2] = 3;
-    out.stride[0] = 3;
-    out.stride[1] = W * 3;
-    out.stride[2] = 1;
-    out.elem_size = 4;
-
-    tiled_blur_interleaved(&in, &out);
+    tiled_blur_interleaved(input, output);
 
     printf("Success!\n");
     return 0;

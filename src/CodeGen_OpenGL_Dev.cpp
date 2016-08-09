@@ -93,7 +93,7 @@ CodeGen_OpenGL_Dev::~CodeGen_OpenGL_Dev() {
 }
 
 void CodeGen_OpenGL_Dev::add_kernel(Stmt s, const string &name,
-                                    const vector<GPU_Argument> &args) {
+                                    const vector<DeviceArgument> &args) {
     cur_kernel_name = name;
     glc->add_kernel(s, name, args);
 }
@@ -192,7 +192,7 @@ void CodeGen_GLSLBase::visit(const Call *op) {
     print_assignment(op->type, rhs.str());
 }
 
-string CodeGen_GLSLBase::print_type(Type type) {
+string CodeGen_GLSLBase::print_type(Type type, AppendSpaceIfNeeded space_option) {
     ostringstream oss;
     type = map_type(type);
     if (type.is_scalar()) {
@@ -217,13 +217,18 @@ string CodeGen_GLSLBase::print_type(Type type) {
         }
         oss << "vec" << type.lanes();
     }
+
+    if (space_option == AppendSpace) {
+        oss << " ";
+    }
+
     return oss.str();
 }
 
 // Identifiers containing double underscores '__' are reserved in GLSL, so we
 // have to use a different name mangling scheme than in the C code generator.
 std::string CodeGen_GLSLBase::print_name(const std::string &name) {
-    std::string mangled = CodeGen_C::print_name(name);
+    const std::string mangled = CodeGen_C::print_name(name);
     return replace_all(mangled, "__", "XX");
 }
 
@@ -243,6 +248,14 @@ void CodeGen_GLSL::visit(const FloatImm *op) {
         oss << std::setprecision(9) << op->value;
     }
     id = oss.str();
+}
+
+void CodeGen_GLSL::visit(const IntImm *op) {
+    print_assignment(op->type, print_type(op->type) + "(" + std::to_string(op->value) + ")");
+}
+
+void CodeGen_GLSL::visit(const UIntImm *op) {
+    print_assignment(op->type, print_type(op->type) + "(" + std::to_string(op->value) + ")");
 }
 
 void CodeGen_GLSL::visit(const Cast *op) {
@@ -384,33 +397,65 @@ std::string CodeGen_GLSL::get_vector_suffix(Expr e) {
         return ".rg";
     } else {
         // GLSL 1.0 Section 5.5 supports subscript based vector indexing
-        return std::string("[") + ((e.type()!=Int(32)) ? "(int)" : "") + print_expr(e) + "]";
+        std::string id = print_assignment(e.type(), print_expr(e));
+        if (e.type() != Int(32)) {
+            id = "int(" + id + ")";
+        }
+        return std::string("[" + id + "]");
     }
 }
 
-void CodeGen_GLSL::visit(const Load *) {
-    internal_error << "GLSL: unexpected Load node encountered.\n";
+char CodeGen_GLSL::get_lane_suffix(int i) {
+    internal_assert(i >= 0 && i < 4);
+    return "rgba"[i];
 }
 
-void CodeGen_GLSL::visit(const Store *) {
-    internal_error << "GLSL: unexpected Store node encountered.\n";
+void CodeGen_GLSL::visit(const Load *op) {
+    string idx = print_expr(op->index);
+    if (op->type.is_scalar()) {
+        print_assignment(op->type, op->name + "[" + idx + "]");
+    } else {
+        ostringstream rhs;
+        rhs << print_type(op->type) << "(";
+        for (int i = 0; i < op->type.lanes(); i++) {
+            char c = get_lane_suffix(i);
+            if (i > 0) {
+                rhs << ", ";
+            }
+            rhs << op->name << "[" << idx << "." << c << "]";
+        }
+        rhs << ")";
+        print_assignment(op->type, rhs.str());
+    }
 }
+
+void CodeGen_GLSL::visit(const Store *op) {
+    string val = print_expr(op->value);
+    string idx = print_expr(op->index);
+    if (op->value.type().is_scalar()) {
+        do_indent();
+        stream << op->name << "[" << idx << "] = " << val << ";\n";
+    } else {
+        internal_assert(op->value.type().lanes() <= 4);
+        for (int i = 0; i < op->value.type().lanes(); i++) {
+            char l = get_lane_suffix(i);
+            do_indent();
+            stream << op->name << "[" << idx << "." << l << "] = " << val << "." << l << ";\n";
+        }
+    }
+}
+
 
 void CodeGen_GLSL::visit(const Evaluate *op) {
     print_expr(op->value);
 }
 
 void CodeGen_GLSL::visit(const Call *op) {
-    if (op->call_type != Call::Intrinsic) {
-        CodeGen_GLSLBase::visit(op);
-        return;
-    }
-
     ostringstream rhs;
-    if (op->name == Call::glsl_texture_load) {
-        // This intrinsic takes four arguments
-        // glsl_texture_load(<tex name>, <buffer>, <x>, <y>)
-        internal_assert(op->args.size() == 4);
+    if (op->is_intrinsic(Call::glsl_texture_load)) {
+        // This intrinsic takes five arguments
+        // glsl_texture_load(<tex name>, <buffer>, <x>, <y>, <c>)
+        internal_assert(op->args.size() == 5);
 
         // The argument to the call is either a StringImm or a broadcasted
         // StringImm if this is part of a vectorized expression
@@ -428,21 +473,74 @@ void CodeGen_GLSL::visit(const Call *op) {
         internal_assert((op->type.code() == Type::UInt || op->type.code() == Type::Float) &&
                         (op->type.lanes() >= 1 && op->type.lanes() <= 4));
 
-        internal_assert(op->args[2].type().lanes() == 1) << "glsl_texture_load argument 2 is not scalar";
-        internal_assert(op->args[3].type().lanes() == 1) << "glsl_texture_load argument 3 is not scalar";
+        if (op->type.is_vector()) {
+            // The channel argument must be a ramp or a broadcast of a constant.
+            Expr c = op->args[4];
+            internal_assert(is_const(c));
 
-        rhs << "texture2D(" << print_name(buffername) << ", vec2("
-            << print_expr(op->args[2]) << ", "
-            << print_expr(op->args[3]) << "))";
+            const Ramp *rc = c.as<Ramp>();
+            const Broadcast *bx = op->args[2].as<Broadcast>();
+            const Broadcast *by = op->args[3].as<Broadcast>();
+            if (rc && is_zero(rc->base) && is_one(rc->stride) && bx && by) {
+                // If the x and y coordinates are broadcasts, and the c
+                // coordinate is a dense ramp, we can do a single
+                // texture2D call.
+                rhs << "texture2D(" << print_name(buffername) << ", vec2("
+                    << print_expr(bx->value) << ", "
+                    << print_expr(by->value) << "))";
+
+                // texture2D always returns a vec4. Swizzle out the lanes we want.
+                switch (op->type.lanes()) {
+                case 1:
+                    rhs << ".r";
+                    break;
+                case 2:
+                    rhs << ".rg";
+                    break;
+                case 3:
+                    rhs << ".rgb";
+                    break;
+                default:
+                    break;
+                }
+            } else {
+                // Otherwise do one load per lane and make a vector
+                string x = print_expr(op->args[2]), y = print_expr(op->args[3]);
+                rhs << "vec" << op->type.lanes() << "(";
+                for (int i = 0; i < op->type.lanes(); i++) {
+                    if (i > 0) {
+                        rhs << ", ";
+                    }
+                    Expr l = extract_lane(c, i);
+                    const int64_t *ic = as_const_int(l);
+                    internal_assert(ic && *ic >= 0 && *ic < 4) << c << "\n";
+                    char c_swizzle = get_lane_suffix(*ic);
+                    char xy_swizzle = get_lane_suffix(i);
+                    rhs << "texture2D(" << print_name(buffername) << ", vec2("
+                        << x << "." << xy_swizzle << ", "
+                        << y << "." << xy_swizzle << "))." << c_swizzle;
+                }
+                rhs << ")";
+            }
+        } else {
+            const int64_t *ic = as_const_int(op->args[4]);
+            internal_assert(ic && *ic >= 0 && *ic < 4);
+            rhs << "texture2D(" << print_name(buffername) << ", vec2("
+                << print_expr(op->args[2]) << ", "
+                << print_expr(op->args[3]) << "))."
+                << get_lane_suffix(*ic);
+        }
+
         if (op->type.is_uint()) {
             rhs << " * " << print_expr(cast<float>(op->type.max()));
         }
 
-    } else if (op->name == Call::glsl_texture_store) {
+    } else if (op->is_intrinsic(Call::glsl_texture_store)) {
         internal_assert(op->args.size() == 6);
         std::string sval = print_expr(op->args[5]);
+        std::string suffix = get_vector_suffix(op->args[4]);
         do_indent();
-        stream << "gl_FragColor" << get_vector_suffix(op->args[4])
+        stream << "gl_FragColor" << suffix
                << " = " << sval;
         if (op->args[5].type().is_uint()) {
             stream << " / " << print_expr(cast<float>(op->args[5].type().max()));
@@ -452,7 +550,7 @@ void CodeGen_GLSL::visit(const Call *op) {
         // no return value.
         id = "";
         return;
-    } else if (op->name == Call::glsl_varying) {
+    } else if (op->is_intrinsic(Call::glsl_varying)) {
         // Varying attributes should be substituted out by this point in
         // codegen.
         debug(2) << "Found skipped varying attribute: " << op->args[0] << "\n";
@@ -461,7 +559,7 @@ void CodeGen_GLSL::visit(const Call *op) {
         print_expr(op->args[1]);
         return;
 
-    } else if (op->name == Call::shuffle_vector) {
+    } else if (op->is_intrinsic(Call::shuffle_vector)) {
         // The halide intrinisc shuffle_vector represents the llvm intrinisc
         // shufflevector, however, for GLSL its use is limited to swizzling
         // up to a four channel vec type.
@@ -477,20 +575,18 @@ void CodeGen_GLSL::visit(const Call *op) {
         // shuffle vector expression is vectorized.
         bool all_int = true;
         for (int i = 0; i != shuffle_lanes && all_int; ++i) {
-            all_int = all_int && (op->args[1 + i].as<IntImm>() != NULL);
+            all_int = all_int && (op->args[1 + i].as<IntImm>() != nullptr);
         }
 
         // Check if the shuffle maps to a canonical type like .r or .rgb
         if (all_int) {
 
             // Create a swizzle expression for the shuffle
-            static const char* channels = "rgba";
             string swizzle;
-
             for (int i = 0; i != shuffle_lanes && all_int; ++i) {
                 int channel = op->args[1 + i].as<IntImm>()->value;
                 internal_assert(channel < 4) << "Shuffle of invalid channel";
-                swizzle += channels[channel];
+                swizzle += get_lane_suffix(channel);
             }
 
             rhs << expr << "." << swizzle;
@@ -525,7 +621,7 @@ void CodeGen_GLSL::visit(const Call *op) {
                 return;
             }
         }
-    } else if (op->name == Call::lerp) {
+    } else if (op->is_intrinsic(Call::lerp)) {
         // Implement lerp using GLSL's mix() function, which always uses
         // floating point arithmetic.
         Expr zero_val = op->args[0];
@@ -555,19 +651,30 @@ void CodeGen_GLSL::visit(const Call *op) {
         print_expr(e);
 
         return;
-    } else if (op->name == Call::abs) {
+    } else if (op->is_intrinsic(Call::abs)) {
         print_expr(call_builtin(op->type, op->name, op->args));
         return;
-    } else if (op->name == Call::return_second) {
+    } else if (op->is_intrinsic(Call::return_second)) {
         internal_assert(op->args.size() == 2);
         // Simply discard the first argument, which is generally a call to
         // 'halide_printf'.
         rhs << print_expr(op->args[1]);
     } else {
-        user_error << "GLSL: intrinsic '" << op->name << "' isn't supported.\n";
+        CodeGen_GLSLBase::visit(op);
         return;
     }
     print_assignment(op->type, rhs.str());
+}
+
+void CodeGen_GLSL::visit(const Allocate *op) {
+    int32_t size = op->constant_allocation_size();
+    user_assert(size) << "Allocations inside GLSL kernels must be constant-sized\n";
+    do_indent();
+    stream << print_type(op->type) << " " << op->name << "[" << size << "];\n";
+    op->body.accept(this);
+}
+
+void CodeGen_GLSL::visit(const Free *op) {
 }
 
 void CodeGen_GLSL::visit(const AssertStmt *) {
@@ -598,7 +705,7 @@ void CodeGen_GLSL::visit(const Broadcast *op) {
 }
 
 void CodeGen_GLSL::add_kernel(Stmt stmt, string name,
-                              const vector<GPU_Argument> &args) {
+                              const vector<DeviceArgument> &args) {
 
     // This function produces fragment shader source for the halide statement.
     // The corresponding vertex shader will be generated by the halide opengl
@@ -696,11 +803,10 @@ void CodeGen_GLSL::add_kernel(Stmt stmt, string name,
     }
 
     // Output additional builtin functions.
-    stream << R"EOF(
-    float _trunc_f32(float x) {
-      return floor(abs(x)) * sign(x);
-    }
-    )EOF";
+    stream <<
+        "float _trunc_f32(float x) {\n"
+        "  return floor(abs(x)) * sign(x);\n"
+        "}\n";
 
     stream << "void main() {\n";
     indent += 2;
@@ -884,9 +990,14 @@ void CodeGen_GLSL::test() {
 
     // Test codegen for texture loads
     Expr load4 = Call::make(Float(32, 4), Call::glsl_texture_load,
-                            {string("buf"), 0, 0, 0},
+                            {string("buf"),
+                             0,
+                             Broadcast::make(0, 4),
+                             Broadcast::make(0, 4),
+                             Ramp::make(0, 1, 4)},
                             Call::Intrinsic);
-    check(load4, "vec4 $ = texture2D($buf, vec2(0, 0));\n");
+    check(load4, "int $ = int(0);\n"
+                 "vec4 $ = texture2D($buf, vec2($, $));\n");
 
     check(log(1.0f), "float $ = log(1.0);\n");
     check(exp(1.0f), "float $ = exp(1.0);\n");

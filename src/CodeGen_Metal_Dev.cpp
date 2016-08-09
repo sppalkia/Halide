@@ -20,7 +20,7 @@ CodeGen_Metal_Dev::CodeGen_Metal_Dev(Target t) :
     metal_c(src_stream), target(t) {
 }
 
-static string print_type_maybe_storage(Type type, bool storage) {
+string CodeGen_Metal_Dev::CodeGen_Metal_C::print_type_maybe_storage(Type type, bool storage, AppendSpaceIfNeeded space) {
     ostringstream oss;
 
     // Storage uses packed vector types.
@@ -73,15 +73,18 @@ static string print_type_maybe_storage(Type type, bool storage) {
             user_error <<  "Unsupported vector width in Metal C: " << type << "\n";
         }
     }
+    if (space == AppendSpace) {
+        oss << ' ';
+    }
     return oss.str();
 }
 
-string CodeGen_Metal_Dev::CodeGen_Metal_C::print_type(Type type) {
-    return print_type_maybe_storage(type, false);
+string CodeGen_Metal_Dev::CodeGen_Metal_C::print_type(Type type, AppendSpaceIfNeeded space) {
+    return print_type_maybe_storage(type, false, space);
 }
 
 string CodeGen_Metal_Dev::CodeGen_Metal_C::print_storage_type(Type type) {
-    return print_type_maybe_storage(type, true);
+    return print_type_maybe_storage(type, true, DoNotAppendSpace);
 }
 
 string CodeGen_Metal_Dev::CodeGen_Metal_C::print_reinterpret(Type type, Expr e) {
@@ -122,16 +125,26 @@ string simt_intrinsic(const string &name) {
 }
 
 void CodeGen_Metal_Dev::CodeGen_Metal_C::visit(const Div *op) {
-    if (op->type.is_int()) {
-        print_expr(Call::make(op->type, "sdiv_" + print_type(op->type), { op->a, op->b }, Call::Extern));
+    int bits;
+    if (is_const_power_of_two_integer(op->b, &bits)) {
+        ostringstream oss;
+        oss << print_expr(op->a) << " >> " << bits;
+        print_assignment(op->type, oss.str());
+    } else if (op->type.is_int()) {
+        print_expr(lower_euclidean_div(op->a, op->b));
     } else {
         visit_binop(op->type, op->a, op->b, "/");
     }
 }
 
 void CodeGen_Metal_Dev::CodeGen_Metal_C::visit(const Mod *op) {
-    if (op->type.is_int()) {
-        print_expr(Call::make(op->type, "smod_" + print_type(op->type), { op->a, op->b }, Call::Extern));
+    int bits;
+    if (is_const_power_of_two_integer(op->b, &bits)) {
+        ostringstream oss;
+        oss << print_expr(op->a) << " & " << ((1 << bits)-1);
+        print_assignment(op->type, oss.str());
+    } else if (op->type.is_int()) {
+        print_expr(lower_euclidean_mod(op->a, op->b));
     } else {
         visit_binop(op->type, op->a, op->b, "%");
     }
@@ -183,7 +196,7 @@ namespace {
 // If e is a ramp expression with stride 1, return the base, otherwise undefined.
 Expr is_ramp_one(Expr e) {
     const Ramp *r = e.as<Ramp>();
-    if (r == NULL) {
+    if (r == nullptr) {
         return Expr();
     }
 
@@ -347,9 +360,8 @@ void CodeGen_Metal_Dev::CodeGen_Metal_C::visit(const Allocate *op) {
 
         // Allocation is not a shared memory allocation, just make a local declaration.
         // It must have a constant size.
-        int32_t size;
-        bool is_constant = constant_allocation_size(op->extents, op->name, size);
-        user_assert(is_constant)
+        int32_t size = op->constant_allocation_size();
+        user_assert(size > 0)
             << "Allocation " << op->name << " has a dynamic size. "
             << "Only fixed-size allocations are supported on the gpu. "
             << "Try storing into shared memory instead.";
@@ -391,7 +403,7 @@ void CodeGen_Metal_Dev::CodeGen_Metal_C::visit(const Cast *op) {
 
 void CodeGen_Metal_Dev::add_kernel(Stmt s,
                                    const string &name,
-                                   const vector<GPU_Argument> &args) {
+                                   const vector<DeviceArgument> &args) {
     debug(2) << "CodeGen_Metal_Dev::compile " << name << "\n";
 
     // TODO: do we have to uniquify these names, or can we trust that they are safe?
@@ -415,7 +427,7 @@ struct BufferSize {
 
 void CodeGen_Metal_Dev::CodeGen_Metal_C::add_kernel(Stmt s,
                                                     const string &name,
-                                                    const vector<GPU_Argument> &args) {
+                                                    const vector<DeviceArgument> &args) {
 
     debug(2) << "Adding Metal kernel " << name << "\n";
 
@@ -546,28 +558,6 @@ void CodeGen_Metal_Dev::CodeGen_Metal_C::add_kernel(Stmt s,
     }
 }
 
-static string smod_def(string T) {
-    ostringstream ss;
-    ss << T << " smod_" << T << "(" << T << " a, " << T << " b) {\n";
-    ss << T << " r = a % b;\n";
-    ss << "if (r < 0) { r += b < 0 ? -b : b; }\n";
-    ss << "return r;\n";
-    ss << "}\n";
-    return ss.str();
-}
-
-static string sdiv_def(string T) {
-    ostringstream ss;
-    ss << T << " sdiv_" << T << "(" << T << " a, " << T << " b) {\n";
-    ss << T << " q = a / b;\n";
-    ss << T << " r = a - q*b;\n";
-    ss << T << " bs = b >> (8*sizeof(" << T << ") - 1);\n";
-    ss << T << " rs = r >> (8*sizeof(" << T << ") - 1);\n";
-    ss << "return q - (rs&bs) + (rs&~bs);\n";
-    ss << "}\n";
-    return ss.str();
-}
-
 void CodeGen_Metal_Dev::init_module() {
     debug(2) << "Metal device codegen init_module\n";
 
@@ -584,12 +574,6 @@ void CodeGen_Metal_Dev::init_module() {
                << "constexpr float neg_inf_f32() { return float_from_bits(0xff800000); }\n"
                << "constexpr float inf_f32() { return float_from_bits(0x7f800000); }\n"
                << "float fast_inverse_f32(float x) { return 1.0f / x; } \n"
-               << smod_def("char") << "\n"
-               << smod_def("short") << "\n"
-               << smod_def("int") << "\n"
-               << sdiv_def("char") << "\n"
-               << sdiv_def("short") << "\n"
-               << sdiv_def("int") << "\n"
                << "#define sqrt_f32 sqrt \n"
                << "#define sin_f32 sin \n"
                << "#define cos_f32 cos \n"

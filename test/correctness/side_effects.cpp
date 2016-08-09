@@ -15,7 +15,7 @@ using namespace Halide;
 // thread-safe.
 
 // Here we use an extern call to print an ascii-art Mandelbrot set.
-#ifdef _MSC_VER
+#ifdef _WIN32
 #define DLLEXPORT __declspec(dllexport)
 #else
 #define DLLEXPORT
@@ -46,8 +46,7 @@ class Complex {
 public:
     Complex(Expr real, Expr imag) : t(real, imag) {}
     Complex(Tuple tup) : t(tup) {}
-    Complex(FuncRefExpr f) : t(Tuple(f)) {}
-    Complex(FuncRefVar f) : t(Tuple(f)) {}
+    Complex(FuncRef f) : t(Tuple(f)) {}
     Expr real() const {return t[0];}
     Expr imag() const {return t[1];}
 
